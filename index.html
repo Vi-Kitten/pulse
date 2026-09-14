@@ -3,12 +3,16 @@
     <head>
         <script>
 
+// TODO: consider moving onRenders responsibilities into prime
 function Component(def) {return {
     map(f) {
         const base = this;
         return Component({
+            onRender(handler) {
+                return base.onRender(handler)
+            },
             render() {
-                return base.render()
+                base.render()
             },
             submit() {
                 base.submit()
@@ -19,8 +23,19 @@ function Component(def) {return {
             }
         });
     },
+    
     ...def
 }}
+
+Component.wrap = val => Component({
+    onRender(handler) {},
+    render() {},
+    submit() {},
+    async prime(submitAll) {
+        submitAll();
+        return val;
+    }
+});
 
 function Html(html, spec) {
     const temp = document.createElement('template');
@@ -30,11 +45,12 @@ function Html(html, spec) {
     const submission = new Promise((res, _) => send = res);
     let comp = Component({
         event: null,
+        render() {},
+        onRender(handler) {
+            this.render = () => handler(elems)
+        },
         submitAll() {
             throw new Error("component not primed");
-        },
-        render() {
-            return elems;
         },
         submit() {
             for (const elem of elems) {
@@ -63,21 +79,26 @@ function Html(html, spec) {
     // TODO: more interaction
     return comp;
 }
+
+function renderRoot(comp) {
+    comp.onRender(elems => document.body.replaceChildren(...elems));
+    comp.render();
+    comp.prime(() => comp.submit()).then((_) => {
+        document.body.replaceChildren();
+        location.replace("about:blank");
+    });
+}
+
         </script>
     </head>
     <body>
         <script>
 
-const comp = Html("<h1>Hello World!</h1>", {
+renderRoot(Html("<h1>Hello World!</h1>", {
     onClick(e) {
         return "Clicked!"
     }
-}).map(msg => console.log(msg));
-
-document.body.replaceChildren(...comp.render());
-comp.prime(() => comp.submit()).then((_) => {
-    document.body.replaceChildren();
-});
+}).map(msg => console.log(msg)));
 
         </script>
     </body>
