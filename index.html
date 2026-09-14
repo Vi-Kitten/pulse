@@ -5,8 +5,8 @@
 
 class UnmountedError extends Error {
     constructor (comp) {
-        this.comp = comp;
         super("Component not mounted");
+        this.comp = comp;
     }
 }
 
@@ -14,7 +14,7 @@ function Component(def) {return {
     async rhetorical() {
         const fut_x = this.mount(_ => {}, () => {});
         this.submit();
-        await fut_x;
+        return await fut_x;
     },
     map(f) {
         const base = this;
@@ -41,7 +41,8 @@ function Component(def) {return {
                 this.current.submit();
             },
             async mount(render, flush) {
-                const x = await this.current.mount(render, () => base.submit());
+                const current = this.current;
+                const x = await current.mount(render, () => current.submit());
                 this.current = f(x);
                 if (this.fastForward) {
                     return await this.current.rhetorical();
@@ -60,7 +61,8 @@ function Component(def) {return {
                 this.current.submit();
             },
             async mount(render, flush) {
-                const x = await this.current.mount(render, () => base.submit());
+                const current = this.current;
+                const x = await current.mount(render, () => current.submit());
                 if (this.skipping) {
                     return x;
                 }
@@ -80,7 +82,8 @@ function Component(def) {return {
             },
             async mount(render, flush) {
                 while (true) {
-                    const x = await this.current.mount(render, () => base.submit());
+                const current = this.current;
+                const x = await current.mount(render, () => current.submit());
                     if (this.skipping) {
                         return x;
                     }
@@ -217,17 +220,12 @@ async function renderRoot(comp) {
     <body>
         <script>
 
-renderRoot(Html("<h1>Hello World!</h1>", {
-    style: "color: green;",
-    onClick(e) {
-        return "Clicked!"
-    }
-}).then(msg => Component.array([
-    Html(`<p>${msg}</p>`),
-    Html("<button>Done</button>", {
+renderRoot(Component.reactive(0, n => Component.array([
+    Html("<button>+1</button>", {
         onClick(e) {}
-    })
-])));
+    }),
+    Html(`<p>${n}</p>`)
+]).map(_ => n + 1)));
 
         </script>
     </body>
