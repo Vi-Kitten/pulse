@@ -3,22 +3,97 @@
     <head>
         <script>
 
+class UnmountedError extends Error {
+    constructor (comp) {
+        this.comp = comp;
+        super("Component not mounted");
+    }
+}
+
 function Component(def) {return {
+    async rhetorical() {
+        const fut_x = this.mount(_ => {}, () => {});
+        this.submit();
+        await fut_x;
+    },
     map(f) {
         const base = this;
         return Component({
             submit() {
-                base.submit()
+                base.submit();
             },
             async mount(render, flush) {
                 const x = await base.mount(render, flush);
-                f(x)
+                return f(x);
             }
         });
     },
-    // ... and more helper friends for later
+    applyTo(...compArgs) {
+        return Component.array([this, ...compArgs]).map(([f, ...args]) => f(...args))
+    },
+    then(f) {
+        const base = this;
+        return Component({
+            current: base,
+            fastForward: false,
+            submit() {
+                this.fastForward = true;
+                this.current.submit();
+            },
+            async mount(render, flush) {
+                const x = await this.current.mount(render, () => base.submit());
+                this.current = f(x);
+                if (this.fastForward) {
+                    return await this.current.rhetorical();
+                }
+                return await this.current.mount(render, flush);
+            }
+        });
+    },
+    weakThen(f) {
+        const base = this;
+        return Component({
+            current: base,
+            skipping: false,
+            submit() {
+                this.skipping = true;
+                this.current.submit();
+            },
+            async mount(render, flush) {
+                const x = await this.current.mount(render, () => base.submit());
+                if (this.skipping) {
+                    return x;
+                }
+                this.current = f(x);
+                return await this.current.mount(render, flush);
+            }
+        });
+    },
+    loop(f) {
+        const base = this;
+        return Component({
+            current: base,
+            skipping: false,
+            submit() {
+                this.skipping = true;
+                this.current.submit();
+            },
+            async mount(render, flush) {
+                while (true) {
+                    const x = await this.current.mount(render, () => base.submit());
+                    if (this.skipping) {
+                        return x;
+                    }
+                    this.current = f(x, x => {
+                        flush();
+                        return Component.done(x);
+                    });
+                }
+            }
+        });
+    },
     ...def
-}}
+}};
 
 // shortcircuit rendering
 Component.done = val => Component({
@@ -32,23 +107,72 @@ Component.done = val => Component({
 // render nothing, return value
 Component.wrap = val => Component({
     submit() {
-        throw new Error("component wrapper not mounted")
+        throw new UnmountedError(this)
     },
     async mount(render, flush) {
+        render([])
         return await new Promise(res => this.submit = () => res(val));
     }
 });
 
-function Html(html, spec) {
+// compute component lazily
+Component.lazy = f => Component({
+    inner: null,
+    submit() {
+        if (this.inner == null) {
+            throw new UnmountedError(this);
+        }
+        this.inner.submit();
+    },
+    async mount(render, flush) {
+        this.inner = f();
+        return await this.inner.mount(render, flush);
+    }
+});
+
+// array of components to a component of an array
+Component.array = components => Component({
+    submit() {
+        for (const component of components) {
+            component.submit()
+        }
+    },
+    renderBuffer: Array(components.length).fill(null),
+    render(..._) {
+        throw new UnmountedError(this);
+    },
+    promptRender() {
+        if (this.renderBuffer.includes(null)) {
+            return; // cannot render yet
+        }
+        this.render(this.renderBuffer.flat());
+    },
+    async mount(render, flush) {
+        this.render = render;
+        return await Promise.all(
+            components.map((component, i) =>
+                component.mount(elems => {
+                    this.renderBuffer[i] = elems;
+                    this.promptRender();
+                }, flush)
+            )
+        );
+    }
+});
+
+// self updating value
+Component.reactive = (x, f) => Component.done(x).loop(f);
+
+function Html(html, spec = {}) {
     const temp = document.createElement('template');
     temp.innerHTML = html.trim();
-    const elems = temp.content.children;
+    const elems = [...temp.content.children];
     let send = undefined;
     const submission = new Promise(res => send = res);
     const comp = Component({
         event: undefined,
         flush() {
-            throw new Error("component not mounted");
+            throw new UnmountedError(this);
         },
         submit() {
             for (const elem of elems) {
@@ -98,7 +222,12 @@ renderRoot(Html("<h1>Hello World!</h1>", {
     onClick(e) {
         return "Clicked!"
     }
-}).map(msg => console.log(msg)));
+}).then(msg => Component.array([
+    Html(`<p>${msg}</p>`),
+    Html("<button>Done</button>", {
+        onClick(e) {}
+    })
+])));
 
         </script>
     </body>
