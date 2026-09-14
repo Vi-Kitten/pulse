@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script>
+
+function Component(def) {return {
+    map(f) {
+        const base = this;
+        return Component({
+            render() {
+                return base.render()
+            },
+            submit() {
+                base.submit()
+            },
+            async prime(submitAll) {
+                const x = await base.prime(submitAll);
+                f(x)
+            }
+        });
+    },
+    ...def
+}}
+
+function Html(html, spec) {
+    const temp = document.createElement('template');
+    temp.innerHTML = html.trim();
+    const elems = temp.content.children;
+    let send = undefined;
+    const submission = new Promise((res, _) => send = res);
+    let comp = Component({
+        event: null,
+        submitAll() {
+            throw new Error("component not primed");
+        },
+        render() {
+            return elems;
+        },
+        submit() {
+            for (const elem of elems) {
+                elem.inert = true;
+            }
+            send(this.event);
+        },
+        prime(submitAll) {
+            this.submitAll = submitAll;
+            return submission;
+        }
+    });
+    if (spec.style !== undefined) {
+        for (const elem of elems) {
+            elem.style = spec.style;
+        }
+    }
+    if (spec.onClick !== undefined) {
+        for (const elem of elems) {
+            elem.onclick = (e) => {
+                comp.event ??= spec.onClick(e);
+                comp.submitAll();
+            };
+        }
+    }
+    // TODO: more interaction
+    return comp;
+}
+        </script>
+    </head>
+    <body>
+        <script>
+
+const comp = Html("<h1>Hello World!</h1>", {
+    onClick(e) {
+        return "Clicked!"
+    }
+}).map(msg => console.log(msg));
+
+document.body.replaceChildren(...comp.render());
+comp.prime(() => comp.submit()).then((_) => {
+    document.body.replaceChildren();
+});
+
+        </script>
+    </body>
+</html>
