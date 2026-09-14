@@ -3,37 +3,39 @@
     <head>
         <script>
 
-// TODO: consider moving onRenders responsibilities into prime
 function Component(def) {return {
     map(f) {
         const base = this;
         return Component({
-            onRender(handler) {
-                return base.onRender(handler)
-            },
-            render() {
-                base.render()
-            },
             submit() {
                 base.submit()
             },
-            async prime(submitAll) {
-                const x = await base.prime(submitAll);
+            async mount(render, flush) {
+                const x = await base.mount(render, flush);
                 f(x)
             }
         });
     },
-    
+    // ... and more helper friends for later
     ...def
 }}
 
-Component.wrap = val => Component({
-    onRender(handler) {},
-    render() {},
+// shortcircuit rendering
+Component.done = val => Component({
     submit() {},
-    async prime(submitAll) {
-        submitAll();
+    async mount(render, flush) {
+        flush();
         return val;
+    }
+});
+
+// render nothing, return value
+Component.wrap = val => Component({
+    submit() {
+        throw new Error("component wrapper not mounted")
+    },
+    async mount(render, flush) {
+        return await new Promise(res => this.submit = () => res(val));
     }
 });
 
@@ -42,15 +44,11 @@ function Html(html, spec) {
     temp.innerHTML = html.trim();
     const elems = temp.content.children;
     let send = undefined;
-    const submission = new Promise((res, _) => send = res);
-    let comp = Component({
-        event: null,
-        render() {},
-        onRender(handler) {
-            this.render = () => handler(elems)
-        },
-        submitAll() {
-            throw new Error("component not primed");
+    const submission = new Promise(res => send = res);
+    const comp = Component({
+        event: undefined,
+        flush() {
+            throw new Error("component not mounted");
         },
         submit() {
             for (const elem of elems) {
@@ -58,8 +56,9 @@ function Html(html, spec) {
             }
             send(this.event);
         },
-        prime(submitAll) {
-            this.submitAll = submitAll;
+        mount(render, flush) {
+            render(elems);
+            this.flush = flush;
             return submission;
         }
     });
@@ -70,9 +69,13 @@ function Html(html, spec) {
     }
     if (spec.onClick !== undefined) {
         for (const elem of elems) {
-            elem.onclick = (e) => {
-                comp.event ??= spec.onClick(e);
-                comp.submitAll();
+            elem.onclick = async (e) => {
+                if (comp.event !== undefined) {
+                    return
+                }
+                comp.event = null;
+                comp.event = await spec.onClick(e);
+                comp.flush();
             };
         }
     }
@@ -80,13 +83,9 @@ function Html(html, spec) {
     return comp;
 }
 
-function renderRoot(comp) {
-    comp.onRender(elems => document.body.replaceChildren(...elems));
-    comp.render();
-    comp.prime(() => comp.submit()).then((_) => {
-        document.body.replaceChildren();
-        location.replace("about:blank");
-    });
+async function renderRoot(comp) {
+    await comp.mount(elems => document.body.replaceChildren(...elems), () => comp.submit());
+    location.replace("about:blank");
 }
 
         </script>
@@ -95,6 +94,7 @@ function renderRoot(comp) {
         <script>
 
 renderRoot(Html("<h1>Hello World!</h1>", {
+    style: "color: green;",
     onClick(e) {
         return "Clicked!"
     }
