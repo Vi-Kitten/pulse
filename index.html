@@ -52,21 +52,25 @@ function Component(def) {return {
         return Component.array([this, ...compArgs]).map(([f, ...args]) => f(...args))
     },
     then(f) {
+        // adapter for pre-do code
+        const g = x => Component.do(ret => f(x, ret));
         const base = this;
         return Component({
             current: base,
             submit() {
                 if (this.current === base) {
-                    return f(this.current.submit()).rhetorical()
+                    return g(this.current.submit()).rhetorical()
                 }
                 return this.current.submit();
             },
             mount(render, flush) {
-                base.mount(render, once(() => (this.current = f(base.submit())).mount(render, flush)));
+                base.mount(render, once(() => (this.current = g(base.submit())).mount(render, flush)));
             }
         });
     },
     weakThen(f) {
+        // adapter for pre-do code
+        const g = x => Component.do(ret => f(x, ret));
         const base = this;
         return Component({
             current: base,
@@ -74,11 +78,13 @@ function Component(def) {return {
                 return this.current.submit();
             },
             mount(render, flush) {
-                base.mount(render, once(() => (this.current = f(base.submit())).mount(render, flush)));
+                base.mount(render, once(() => (this.current = g(base.submit())).mount(render, flush)));
             }
         });
     },
     loop(f) {
+        // adapter for pre-do code
+        const g = (x, brk) => Component.do(cont => f(x, cont, brk));
         const base = this;
         return Component({
             current: base,
@@ -92,7 +98,7 @@ function Component(def) {return {
                 }
                 const current = this.current;
                 current.mount(render, once(() => {
-                    this.current = f(current.submit(), val => {
+                    this.current = g(current.submit(), val => {
                         if (this.breaking) return;
                         this.breaking = true;
                         this.submit = () => val;
@@ -138,15 +144,22 @@ Component.wrap = val => Component({
     }
 });
 
-// compute component lazily
-Component.lazy = f => Component({
+// lazy component with an early return hook
+Component.do = f => Component({
     submit() {
         throw new UnmountedError(this);
     },
     mount(render, flush) {
-        const inner = f();
-        this.submit = () => inner.submit();
-        inner.mount(render, flush);
+        let returned = false;
+        const inner = f(val => {
+            returned = true;
+            this.submit = () => val;
+            flush();
+        });
+        if (!returned) {
+            this.submit = () => inner.submit();
+            inner.mount(render, flush);
+        }
     }
 });
 
@@ -183,7 +196,7 @@ function Html(html, spec = {}) {
     temp.innerHTML = html.trim();
     const elems = [...temp.content.children];
     const comp = Component({
-        event: null,
+        val: null,
         mounted: false,
         flush() {
             throw new UnmountedError(this);
@@ -198,7 +211,7 @@ function Html(html, spec = {}) {
             for (const elem of elems) {
                 elem.inert = true;
             }
-            return this.event;
+            return this.val;
         },
         mount(render, flush) {
             this.mounted = true;
@@ -219,12 +232,28 @@ function Html(html, spec = {}) {
                     return;
                 }
                 triggered = true;
-                comp.event = await spec.onClick(e);
+                comp.val = await spec.onClick(e);
                 comp.flush();
             };
         }
     }
-    // TODO: more interaction
+    return comp;
+}
+
+function Tag(tagName, inner, spec = {}) {
+    const elem = document.createElement(tagName);
+    const comp = Component({
+        submit() {
+            return inner.submit();
+        },
+        mount(render, flush) {
+            inner.mount(children => elem.replaceChildren(...children), flush);
+            render([elem]);
+        }
+    });
+    if (spec.style !== undefined) {
+        elem.style = spec.style;
+    }
     return comp;
 }
 
@@ -246,17 +275,22 @@ async function renderRoot(comp) {
     <body>
         <script>
 
-renderRoot(Component.reactive(0, (n, brk) => Component.array([
-    Html("<button>+1</button>", {
-        onClick(e) {}
+renderRoot(Component.reactive(0, (n, cont, brk) => Component.array([
+    Tag("div", Component.array([
+        Html("<button>+1</button>", {
+            onClick: _ => cont(n + 1)
+        }),
+        Html(`<p>${n}</p>`),
+        Html("<button>-1</button>", {
+            onClick: _ => cont(n - 1)
+        }),
+    ]), {
+        style: "border: solid black; display: inline-block;",
     }),
-    Html(`<p>${n}</p>`),
     Html("<button>finish</button>", {
-        onClick(e) {
-            brk(n)
-        }
+        onClick: _ => brk(n)
     })
-]).map(_ => n + 1)));
+])));
 
         </script>
     </body>
