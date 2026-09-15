@@ -3,20 +3,6 @@
     <head>
         <script>
 
-class UnmountedError extends Error {
-    constructor (comp) {
-        super("Component not mounted");
-        this.comp = comp;
-    }
-}
-
-class DoubleSubmitError extends Error {
-    constructor(comp) {
-        super("Component submitted twice");
-        this.comp = comp;
-    }
-}
-
 function once(f) {
     let called = false;
     return (...args) => {
@@ -32,160 +18,123 @@ async function painted() {
     )
 };
 
-function Component(def) {return {
-    rhetorical() {
-        this.mount(_ => {}, () => {});
-        return this.submit();
-    },
-    map(f) {
-        const base = this;
-        return Component({
-            submit() {
-                return f(base.submit());
-            },
-            mount(render, flush) {
-                base.mount(render, flush);
-            }
-        });
-    },
-    applyTo(...compArgs) {
-        return Component.array([this, ...compArgs]).map(([f, ...args]) => f(...args))
-    },
-    then(f) {
-        // adapter for pre-do code
-        const g = x => Component.do(ret => f(x, ret));
-        const base = this;
-        return Component({
-            current: base,
-            submit() {
-                if (this.current === base) {
-                    return g(this.current.submit()).rhetorical()
-                }
-                return this.current.submit();
-            },
-            mount(render, flush) {
-                base.mount(render, once(() => (this.current = g(base.submit())).mount(render, flush)));
-            }
-        });
-    },
-    weakThen(f) {
-        // adapter for pre-do code
-        const g = x => Component.do(ret => f(x, ret));
-        const base = this;
-        return Component({
-            current: base,
-            submit() {
-                return this.current.submit();
-            },
-            mount(render, flush) {
-                base.mount(render, once(() => (this.current = g(base.submit())).mount(render, flush)));
-            }
-        });
-    },
-    loop(f) {
-        // adapter for pre-do code
-        const g = (x, brk) => Component.do(cont => f(x, cont, brk));
-        const base = this;
-        return Component({
-            current: base,
-            breaking: false,
-            submit() {
-                return this.current.submit();
-            },
-            mount(render, flush) {
-                if (this.breaking) {
-                    return;
-                }
-                const current = this.current;
-                current.mount(render, once(() => {
-                    this.current = g(current.submit(), val => {
-                        if (this.breaking) return;
-                        this.breaking = true;
-                        this.submit = () => val;
+function Component (mountFn) {
+    const mount = (render, flush) => {
+        let submitted = false;
+        const submit = mountFn(render, flush);
+        return () => {
+            if (submitted) throw new Error("component submitted twice");
+            submitted = true;
+            return submit();
+        };
+    }
+    const root = (render, resolve) => {
+        let submit = null;
+        const run = once(() => resolve(submit()));
+        let fastFlush = false;
+        submit = mountFn(render, () => submit == null
+            ? fastFlush = true
+            : run()
+        );
+        if (fastFlush) run();
+        return () => { run() };
+    };
+    return {
+        mount,
+        root,
+        rhetorical: () => mount(_ => {}, () => {})(),
+        map: f => Component((render, flush) => {
+            const submit = mount(render, flush);
+            return () => f(submit());
+        }),
+        applyTo: (...compArgs) => Component.array([Component(mount), ...compArgs]).map(([f, ...args]) => f(...args)),
+        then: f => Component((render, flush) => {
+            let submit = null;
+            const run = root(render, val =>
+                submit = Component.do(ret => f(val, ret)).mount(render, flush)
+            );
+            return () => {
+                run();
+                return submit()
+            };
+        }),
+        weakThen: f => Component((render, flush) => {
+            let skipping = false;
+            let submit = null;
+            const run = root(render, val => skipping
+                ? submit = () => val
+                : submit = Component.do(ret => f(val, ret)).mount(render, flush)
+            );
+            return () => {
+                skipping = true;
+                run();
+                return submit()
+            };
+        }),
+        loop: f => Component((render, flush) => {
+            let run = null;
+            let breakWith = null;
+            let breakVal = undefined;
+            function continueWith(root) {
+                run = root(render, val => breakWith
+                    ? breakWith(val)
+                    : continueWith(Component.do(cont => f(val, cont, val => {
+                        // on break
+                        breakVal = val;
+                        breakWith = _ => {};
                         flush();
-                    });
-                    this.mount(render, flush);
-                }));
+                    })).root)
+                )
             }
-        });
-    },
-    ...def
-}};
+            continueWith(root);
+            return () => {
+                if (breakWith == null) {
+                    breakWith = val => breakVal = val;
+                    run()
+                }
+                return breakVal;
+            };
+        })
+    }
+};
 
 // shortcircuit rendering
-Component.done = val => Component({
-    mounted: false,
-    submit() {
-        if (!this.mounted) {
-            throw new UnmountedError(this);
-        }
-        this.submit = () => { throw new DoubleSubmitError(); };
-        return val;
-    },
-    mount(render, flush) {
-        this.mounted = true;
-        flush();
-    }
+Component.done = val => Component((render, flush) => {
+    flush();
+    return () => val;
 });
 
 // render nothing, return value
-Component.wrap = val => Component({
-    mounted: false,
-    submit() {
-        if (!this.mounted) {
-            throw new UnmountedError(this);
-        }
-        this.submit = () => { throw new DoubleSubmitError(); };
-        return val;
-    },
-    mount(render, flush) {
-        this.mounted = true;
-        render([]);
-    }
+Component.wrap = val => Component((render, flush) => {
+    render([]);
+    return () => val;
 });
 
 // lazy component with an early return hook
-Component.do = f => Component({
-    submit() {
-        throw new UnmountedError(this);
-    },
-    mount(render, flush) {
-        let returned = false;
-        const inner = f(val => {
-            returned = true;
-            this.submit = () => val;
-            flush();
-        });
-        if (!returned) {
-            this.submit = () => inner.submit();
-            inner.mount(render, flush);
-        }
-    }
+Component.do = f => Component((render, flush) => {
+    let returned = false;
+    let ret = undefined;
+    const inner = f(val => {
+        returned = true;
+        ret = val;
+        flush();
+    });
+    const submit = inner.mount(render, flush);
+    return () => returned ? ret : submit();
 });
 
 // array of components to a component of an array
-Component.array = components => Component({
-    submit() {
-        return components.map(component => component.submit());
-    },
-    renderBuffer: Array(components.length).fill(null),
-    render(..._) {
-        throw new UnmountedError(this);
-    },
-    promptRender() {
-        if (this.renderBuffer.includes(null)) return;
-        this.render(this.renderBuffer.flat());
-    },
-    mount(render, flush) {
-        this.render = render;
-        components.forEach((component, i) => component.mount(
-            elems => {
-                this.renderBuffer[i] = elems;
-                this.promptRender();
-            },
-            flush
-        ));
-    }
+Component.array = components => Component((render, flush) => {
+    const renderBuffer = Array(components.length).fill(null);
+    const submits = components.map((component, i) => component.mount(
+        elems => {
+            renderBuffer[i] = elems;
+            if (renderBuffer.includes(null)) return;
+            render(renderBuffer.flat());
+        },
+        flush
+    ));
+    return () => submits.forEach(submit => submit());
 });
 
 // self updating value
@@ -195,31 +144,7 @@ function Html(html, spec = {}) {
     const temp = document.createElement('template');
     temp.innerHTML = html.trim();
     const elems = [...temp.content.children];
-    const comp = Component({
-        val: null,
-        mounted: false,
-        flush() {
-            throw new UnmountedError(this);
-        },
-        submit() {
-            if (!this.mounted) {
-                throw new UnmountedError(this);
-            }
-            this.submit = () => {
-                throw new DoubleSubmitError(this);
-            };
-            for (const elem of elems) {
-                elem.inert = true;
-            }
-            return this.val;
-        },
-        mount(render, flush) {
-            this.mounted = true;
-            this.flush = flush;
-            render(elems);
-        }
-    });
-    let triggered = false;
+    let handle = undefined;
     if (spec.style !== undefined) {
         for (const elem of elems) {
             elem.style = spec.style;
@@ -227,41 +152,39 @@ function Html(html, spec = {}) {
     }
     if (spec.onClick !== undefined) {
         for (const elem of elems) {
-            elem.onclick = async (e) => {
-                if (triggered) {
-                    return;
-                }
-                triggered = true;
-                comp.val = await spec.onClick(e);
-                comp.flush();
-            };
+            elem.onclick = async (e) => handle(spec.onClick(e))
         }
     }
-    return comp;
+    let val = null;
+    return Component((render, flush) => {
+        handle = eventVal => {
+            val = eventVal;
+            for (const elem of elems) {
+                elem.inert = true;
+            }
+            flush();
+        };
+        render(elems);
+        return () => val;
+    })
 }
 
 function Tag(tagName, inner, spec = {}) {
     const elem = document.createElement(tagName);
-    const comp = Component({
-        submit() {
-            return inner.submit();
-        },
-        mount(render, flush) {
-            inner.mount(children => elem.replaceChildren(...children), flush);
-            render([elem]);
-        }
-    });
     if (spec.style !== undefined) {
         elem.style = spec.style;
     }
-    return comp;
+    return Component((render, flush) => {
+        render([elem]);
+        return inner.mount(children => elem.replaceChildren(...children), flush);
+    });
 }
 
 async function renderRoot(comp) {
-    let val = await new Promise(res => comp.mount(
+    let val = await new Promise(res => comp.root(
         elems => document.body.replaceChildren(...elems),
-        once(() => res(comp.submit())))
-    );
+        res
+    ));
     document.body.replaceChildren();
     if (val !== undefined) {
         await painted();
