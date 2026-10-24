@@ -6,11 +6,11 @@ let prompt = Form.loop(0, (n, cont, brk) => Prompt.select(
     show('p', {}, blank, `${n}`),
     show('button', {}, blank.on('click', () => n - 1), "-1"),
     show('button', {}, blank.on('click', () => brk(n)), "submit")
-)).then(n => show('p', {}, blank, `${n}`));
+));
 
 prompt.mount(elems => document.body.replaceChildren(...elems), val => painted().then(() => {
-    location.replace('about:blank');
     if (val !== undefined) {
         alert(val);
     }
+    location.replace('about:blank');
 }));

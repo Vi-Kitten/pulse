@@ -44,7 +44,7 @@ class PulseScope {
         }
     }
     /**
-     * @param {() => void} f 
+     * @param {() => void} f
      */
     static guardAll(f) {
         try { f(); } catch (err) {
