@@ -5,27 +5,56 @@
  * @typedef {[] | [T]} Maybe
  */
 
-/**
- * @template {unknown[]} Args
- * @template Ret
- * @param {(...xs: Args) => Ret} f 
- * @returns {(...xs: Args) => Ret}
- */
-function once(f) {
-    /** @type {Maybe<Ret>} */
-    let val = [];
-    return (...args) => {
-        if (val.length) return val[0];
-        let ret = f(...args);
-        val = [ret];
-        return ret;
-    };
-}
-
 export async function painted() {
     await new Promise(res =>
         requestAnimationFrame(() => requestAnimationFrame(res))
     );
+}
+
+class PulseNever {
+    /**
+     * @param {PulseScope} scope 
+     */
+    constructor(scope) {
+        /**
+         * @readonly
+         */
+        this.scope = scope;
+    }
+}
+
+class PulseScope {
+    /**
+     * @returns {never}
+     */
+    jump() {
+        throw new PulseNever(this);
+    }
+    /**
+     * @param {() => void} f
+     * @returns {void}
+     */
+    guard(f) {
+        try { f(); } catch (err) {
+            if (err instanceof PulseNever && err.scope === this) {
+                return;
+            } else {
+                throw err;
+            }
+        }
+    }
+    /**
+     * @param {() => void} f 
+     */
+    static guardAll(f) {
+        try { f(); } catch (err) {
+            if (err instanceof PulseNever) {
+                return;
+            } else {
+                throw err;
+            }
+        }
+    }
 }
 
 /** @typedef {(elems: HTMLElement[]) => void} Renderer */
@@ -39,7 +68,11 @@ export async function painted() {
  * @param {number} n
  * @return {Renderer[]} 
  */
-function fan_in(render, n) {
+function fanIn(render, n) {
+    if (n === 0) {
+        render([])
+        return [];
+    }
     const renderBuffer = Array(n).fill(null);
     return Array.from({ length: n }, (_, i) => elems => {
         renderBuffer[i] = elems;
@@ -66,17 +99,17 @@ export class Prompt {
             /**
              * @type {HTMLElement[]}
              */
-            let current_elems = [];
+            let currentElems = [];
 
             mount(elems => {
                 if (finished) return;
 
                 render(elems);
-                current_elems = elems;
+                currentElems = elems;
             }, val => {
                 if (finished) return;
                 finished = true;
-                for (let elem of current_elems) {
+                for (let elem of currentElems) {
                     elem.inert = true;
                 }
 
@@ -95,12 +128,13 @@ export class Prompt {
 
     );}
     /**
-     * Render with a continuation after submition.
+     * Render with a continuation after submission.
      * 
      * _Sequential operator_
      * @template U
-     * @param {(val: T, early: (ret: U) => void) => Prompt<U>} f
-     * @returns {Prompt<U>}
+     * @template [V=U]
+     * @param {(val: T, early: (ret: V) => never) => Prompt<U>} f
+     * @returns {Prompt<U | V>}
      */
     then(f) { return new Prompt((render, res) =>
 
@@ -109,6 +143,17 @@ export class Prompt {
         )
 
     );}
+    /**
+     * @template [U=T]
+     * @param {(res: (val: U) => void) => void} f
+     * @returns {Prompt<T | U>}
+     */
+    withPromise(f) { return new Prompt((render, res) => {
+
+        this.mount(render, res);
+        new Promise(f).then(x => PulseScope.guardAll(() => res(x)));
+
+    });}
     /**
      * @template T
      * @param {T} val
@@ -121,14 +166,23 @@ export class Prompt {
     );}
     /**
      * @template T
-     * @param {(early: (ret: T) => void) => Prompt<T>} f 
-     * @returns {Prompt<T>}
+     * @template [U=T]
+     * @param {(early: (ret: U) => never) => Prompt<T>} f 
+     * @returns {Prompt<T | U>}
      */
-    static do(f) { return new Prompt((render, res) =>
-        
-        f(res).mount(render, res)
+    static do(f) { return new Prompt((render, res) => {
+
+        const scope = new PulseScope();
+        scope.guard(() => f(val => {
+            res(val);
+            return scope.jump();
+        }).mount(render, res));
     
-    );}
+    });}
+    /**
+     * @returns {Prompt<never>}
+     */
+    static never() { return new Prompt((render, _) => render([])); }
     /**
      * Combine multiple components, selecting the first one.
      * @template T
@@ -137,7 +191,7 @@ export class Prompt {
      */
     static select(...components) { return new Prompt((render, res) =>
 
-        fan_in(render, components.length).map((render, i) =>
+        fanIn(render, components.length).map((render, i) =>
             components[i].mount(render, res)
         )
 
@@ -157,11 +211,14 @@ export class Form extends Prompt {
         super((render, res) => {
             /** @type {Maybe<Action<T>>} */
             let mounted = [];
+            let flushed = false;
 
-            const run = once(() => res(mounted.length
-                ? mounted[0]()
-                : (() => { throw new Error("Internal rooting state error")})()
-            ));
+            const run = () => {
+                if (!mounted.length) throw new Error("Internal rooting state error");
+                if (flushed) return;
+                flushed = true;
+                res(mounted[0]());
+            }
 
             let fastFlush = false;
             mounted = [link(render, () => mounted.length
@@ -179,17 +236,17 @@ export class Form extends Prompt {
             /**
              * @type {HTMLElement[]}
              */
-            let current_elems = [];
+            let currentElems = [];
 
             return link(elems => {
                 if (finished) return;
 
                 render(elems);
-                current_elems = elems;
+                currentElems = elems;
             }, () => {
                 if (finished) return;
                 finished = true;
-                for (let elem of current_elems) {
+                for (let elem of currentElems) {
                     elem.inert = true;
                 }
 
@@ -228,27 +285,30 @@ export class Form extends Prompt {
     /**
      * Repeatedly render and change value.
      * @template T
+     * @template [U=T]
      * @param {T} init
-     * @param {(state: T, cont: (val: T) => void, brk: (ret: T) => void) => Prompt<T>} f
-     * @returns {Form<T>}
+     * @param {(state: T, cont: (val: T) => never, brk: (ret: U) => never) => Prompt<T>} f
+     * @returns {Form<T | U>}
      */
-    static loop(init, f) { return Form.loopWith(init, f, x => x); }
+    static loop(init, f) { return Form.loopWith(init, f, /** @type {(x: T) => T | U} */ (x => x)); }
     /**
      * Repeatedly render and change value, breaking or projecting to a different type.
      * @template T
-     * @template U
+     * @template [U=T]
      * @param {T} init
-     * @param {(state: T, cont: (val: T) => void, brk: (ret: U) => void) => Prompt<T>} f
+     * @param {(state: T, cont: (val: T) => never, brk: (ret: U) => never) => Prompt<T>} f
      * @param {(state: T) => U} proj
      * @returns {Form<U>}
      */
     static loopWith(init, f, proj) { return new Form((render, flush) => {
 
+        const scope = new PulseScope();
         let state = init;
         /** @type {Maybe<U>} */
         let final = [];
 
-        function step() {
+        function step() { scope.guard(() => {
+
             // trampolined recursion
             let looping = true, immediate = true;
             function stepInner() {
@@ -260,13 +320,15 @@ export class Form extends Prompt {
             }
             
             while (immediate) {
-                if (final.length != 0) break;
+                if (final.length !== 0) break;
                 immediate = false;
 
                 Prompt.do(cont => f(state, cont, val => {
                     // on break
                     final = [val];
                     flush();
+                    looping = false;
+                    return scope.jump();
                 })).mount(render, val => {
                     // on continue
                     state = val;
@@ -275,11 +337,11 @@ export class Form extends Prompt {
             }
 
             looping = false;
-        }
+        });}
         step();
 
         return () => {
-            if (final.length == 0) {
+            if (final.length === 0) {
                 final = [proj(state)]
             }
             return final[0];
@@ -294,7 +356,7 @@ export class Form extends Prompt {
      */
     static array(...forms) { return new Form((render, flush) => {
 
-        let submits = fan_in(render, forms.length).map((render, i) =>
+        let submits = fanIn(render, forms.length).map((render, i) =>
             forms[i].link(render, flush)
         );
         return () => /** @type {Args} */ (submits.map(f => f()));
@@ -320,13 +382,13 @@ export class EventHandler {
      * @template {keyof HTMLElementEventMap} K
      * @template B
      * @param {K} type
-     * @param {(elem: E, e: HTMLElementEventMap[K], resolve: (b: B) => void) => void} handler
+     * @param {(elem: E, e: HTMLElementEventMap[K], resolve: (b: B) => void) => void} func
      * @returns {EventHandler<A | B, E>}
      */
-    onWith(type, handler) {
+    onWith(type, func) {
         return new EventHandler((elem, resolve) => {
             this.listen(elem, resolve);
-            elem.addEventListener(type, e => handler(elem, e, resolve));
+            elem.addEventListener(type, e => queueMicrotask(() => PulseScope.guardAll(() => func(elem, e, resolve))));
         });
     }
     /**
@@ -349,52 +411,33 @@ export class EventHandler {
      */
     onKey(key, f) {
         return this.onWith('keydown', (elem, e, resolve) => {
-            if (!e.isComposing && e.key.toLowerCase() == key.toLowerCase()) resolve(f(elem, e));
+            if (!e.isComposing && e.key.toLowerCase() === key.toLowerCase()) resolve(f(elem, e));
         });
     }
 }
 
 /**
  * Blank event handler.
- * @readonly
  * @type {EventHandler<never>}
  * */
 export const blank = new EventHandler(() => {});
 
-// /**
-//  * @template [A=never]
-//  * @param {Selector<A, HTMLElement>} selector
-//  * @param {string} html
-//  * @returns {Prompt<A>}
-//  */
-// function HTML(selector, html) { return new Prompt((render, res) => {
-
-//     let temp = document.createElement('template');
-//     temp.innerHTML = html.trim();
-//     let elems = /** @type {HTMLElement[]} */ ([...temp.content.children]);
-//     for (let elem of elems) {
-//         selector.listen(elem, res);
-//     }
-//     render(elems);
-
-// });}
-
 /**
- * Create a prompt with a give tag and event handler.
+ * Create a prompt with a given tag and event handler.
  * @template {keyof HTMLElementTagNameMap} K
  * @template [A=never]
  * @param {K} tag
  * @param {Partial<HTMLElementTagNameMap[K]>} props
- * @param {EventHandler<A, HTMLElementTagNameMap[K]>} selector
+ * @param {EventHandler<A, HTMLElementTagNameMap[K]>} handler
  * @param {string} html
  * @returns {Prompt<A>}
  */
-export function show(tag, props, selector, html) { return new Prompt((render, res) => {
+export function show(tag, props, handler, html) { return new Prompt((render, res) => {
 
     let elem = document.createElement(tag);
     elem.innerHTML = html.trim();
     Object.assign(elem, props);
-    selector.listen(elem, res);
+    handler.listen(elem, res);
     render([elem]);
 
 });}
